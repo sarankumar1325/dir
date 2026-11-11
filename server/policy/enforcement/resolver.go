@@ -7,6 +7,7 @@ package enforcement
 
 import (
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -53,12 +54,19 @@ type Resolver struct {
 	refreshedAt atomic.Int64
 	refreshing  atomic.Bool
 
-	// mu serializes refreshes and guards warned.
+	// mu serializes refreshes and guards warned and seen.
 	mu sync.Mutex
 
 	// warned holds the policies already reported as registered by no
 	// evaluator.
 	warned map[string]bool
+
+	// seen holds the version of each policy last resolved, so that a change
+	// of version can be reported once, when it is first enforced.
+	seen map[string]string
+
+	// log is where the resolver reports what it enforces.
+	log *slog.Logger
 }
 
 // NewResolver resolves the enforcement once, so the server does not start
@@ -81,6 +89,8 @@ func NewResolver(
 		interval:    interval,
 		now:         time.Now,
 		warned:      map[string]bool{},
+		seen:        map[string]string{},
+		log:         logger,
 	}
 
 	if err := resolver.Refresh(); err != nil {
@@ -232,6 +242,18 @@ func (r *Resolver) resolve(id string) (types.VersionedPolicy, bool, error) {
 
 		return types.VersionedPolicy{ID: id}, false, nil
 	}
+
+	// A new version is enforced at once, and a verdict under any other does
+	// not count, so every record still evaluated under the previous version
+	// leaves reads until it is re-evaluated. Say so, once per change. First
+	// sight of a policy is not a change: the startup summary and the backfill
+	// line already cover it.
+	if previous, known := r.seen[id]; known && previous != version {
+		r.log.Info("Policy version changed; records are hidden from reads until re-evaluated under the new version",
+			"policy_id", id, "previous_version", previous, "version", version)
+	}
+
+	r.seen[id] = version
 
 	policy := types.VersionedPolicy{ID: id, Version: version}
 

@@ -4,7 +4,9 @@
 package enforcement
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
 	"slices"
 	"strings"
 	"sync"
@@ -489,4 +491,57 @@ func TestResolver_EveryStoreCallCanFailTheStart(t *testing.T) {
 			require.ErrorContains(t, err, "database unavailable")
 		})
 	}
+}
+
+// logTo points the resolver's log at a buffer, so a test can read what it
+// reported.
+func logTo(resolver *Resolver) *bytes.Buffer {
+	var buf bytes.Buffer
+
+	resolver.log = slog.New(slog.NewTextHandler(&buf, nil))
+
+	return &buf
+}
+
+// An edit hides every record still evaluated under the previous version, so
+// the change is reported, naming both versions, once.
+func TestResolver_AVersionChangeIsLoggedOnce(t *testing.T) {
+	t.Parallel()
+
+	c := newClock()
+	store := newVersions()
+	store.register("opa:a", "h1")
+
+	resolver := newResolver(t, store, c, "opa:a")
+	logs := logTo(resolver)
+
+	refresh(t, resolver)
+	assert.Empty(t, logs.String(), "an unchanged version is not reported")
+
+	store.register("opa:a", "h2")
+	refresh(t, resolver)
+	refresh(t, resolver)
+
+	assert.Equal(t, 1, strings.Count(logs.String(), "Policy version changed"))
+	assert.Contains(t, logs.String(), "policy_id=opa:a")
+	assert.Contains(t, logs.String(), "previous_version=h1")
+	assert.Contains(t, logs.String(), "version=h2")
+}
+
+// First sight of a policy, at startup or when it is registered later, is not a
+// change.
+func TestResolver_FirstSightOfAPolicyIsNotLoggedAsAChange(t *testing.T) {
+	t.Parallel()
+
+	c := newClock()
+	store := newVersions()
+	store.register("opa:a", "h1")
+
+	resolver := newResolver(t, store, c, "opa:a", "opa:later")
+	logs := logTo(resolver)
+
+	store.register("opa:later", "h1")
+	refresh(t, resolver)
+
+	assert.NotContains(t, logs.String(), "Policy version changed")
 }
